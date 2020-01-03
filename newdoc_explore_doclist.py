@@ -1,5 +1,7 @@
 #coding=utf-8
 
+import utils.TimeUtils as TimeUtils
+
 class DocStruct():
 
     def __init__(self,id,max_cnt,now_cnt,ctr,create_time):
@@ -14,7 +16,6 @@ class DocStruct():
         return self.max_cnt <= self.now_cnt
 
     def NowCntPlus(self,cnt):
-
         self.now_cnt+=cnt
 
     def __str__(self):
@@ -29,6 +30,15 @@ class DocDictStruct(dict):
     def GetAvailableList(self):
 
         return DocDictStruct({k:v for k,v in self.items() if False==v.IsFull()})
+
+    def ClearExpTimeList(self,expireTime):
+
+        nowTime = TimeUtils.GetNowUnixTime()
+        for k,v in self.items():
+            creatTime=TimeUtils.String2UnixTime(v.create_time,"%Y-%m-%d %H:%M:%S")
+            if nowTime - creatTime > expireTime:
+                self.pop(k)
+                continue
 
     def ClearFullList(self):
 

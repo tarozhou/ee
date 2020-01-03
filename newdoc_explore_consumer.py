@@ -45,8 +45,6 @@ def GetClickStat(plist):
 
     json_result = json.loads(response.read())
 
-    print json_result
-
     bkt = json_result["aggregations"]["result"]["buckets"]
 
     pclickDict = {}
@@ -57,31 +55,47 @@ def GetClickStat(plist):
     return pclickDict
 
 
+def GetClickStatRedis():
+
+
+    res = {}
+    rkey = "pick_v2_click_queue"
+    redis1_ = RedisManager(REDIS_SERVER1, 'Migu@2020')
+    plist = redis1_.Handle().lrange(rkey,0,-1)
+    for p in plist:
+        arr = p.split("#")
+        program_id = arr[0]
+        cnt = int(arr[1])
+        if res.has_key(program_id):
+            res[program_id] = res[program_id]+cnt
+        else:
+            res[program_id]=cnt
+
+    return res
+
 def CaculateFullDoc(fullDoc):
 
     plist = fullDoc.keys()
 
     pclickDict = GetClickStat(plist)
 
-    print "===========pclickDict:",len(pclickDict)
+    pclickDictRedis = GetClickStatRedis()
 
-    #pclickDict = GetClickStatDebug(plist)
-
-    nowTime = TimeUtils.GetNowUnixTime()
+    #用于测试Debug
+    for k,v in pclickDictRedis.items():
+        if pclickDict.has_key(k):
+            pclickDict[k] = pclickDict[k] + v
+        else:
+            pclickDict[k] = v
 
     moreActionDoc = DocDictStruct()
 
     for programid,doc in fullDoc.items():
 
-        #时间超过不受限3天的内容直接下架
-        creatTime=TimeUtils.String2UnixTime(doc.create_time,"%Y-%m-%d %H:%M:%S")
-        if nowTime - creatTime > 3*24*60*60:
-            print "%s time over"%doc.id
-            continue
-
         if pclickDict.has_key(doc.id):
             ctr = float(pclickDict[doc.id])/doc.max_cnt
-            print doc.id,doc.max_cnt,ctr,doc.create_time
+            doc.ctr = ctr
+            print doc.id,doc.max_cnt,ctr,doc.create_time,pclickDict[doc.id]
             if ctr >= 0.08:
                 if doc.max_cnt == 50:
                     doc.max_cnt = 200
@@ -96,6 +110,15 @@ def CaculateFullDoc(fullDoc):
 
                 moreActionDoc[programid] = doc
 
+
+    try:
+        with open("./data/offline_program.txt","a") as f:
+            for k, v in fullDoc.items():
+                if False == moreActionDoc.has_key(k):
+                    f.write(k+"\n")
+    except:
+        pass
+
     return moreActionDoc
 
 
@@ -104,7 +127,8 @@ def UpLoadDocRedis(rkey,iDoc):
     redis1_ = RedisManager(REDIS_SERVER1, 'Migu@2020')
     plist = [y.__str__() for x,y in iDoc.items()]
     redis1_.Delete(rkey)
-    redis1_.SetList(rkey, plist, 864000)
+    if len(iDoc) > 0:
+        redis1_.SetList(rkey, plist, 864000)
 
 
 def DownLoadDoc():
@@ -113,6 +137,8 @@ def DownLoadDoc():
     redis1_ = RedisManager(REDIS_SERVER1, 'Migu@2020')
 
     plist = redis1_.Handle().lrange(rkey, 0, -1)
+
+    print "plist",len(plist)
 
     dds = DocDictStruct()
     for p in plist:
@@ -123,12 +149,35 @@ def DownLoadDoc():
 
     return dds
 
+
+def Stat(iDoc):
+
+    res = {}
+
+    for k,v in iDoc.items():
+
+        if res.has_key(v.max_cnt):
+            res[v.max_cnt] += 1
+        else:
+            res[v.max_cnt] = 1
+    print "=======Stat======="
+    for k,v in res.items():
+        print "====max_cnt:",k," ===cnt:",v
+
 def SetmList(mlist):
 
     rkey = "pick_v2_ee"
     redis1_ = RedisManager(REDIS_SERVER1, 'Migu@2020')
     redis1_.Delete(rkey)
-    redis1_.SetList(rkey, mlist, 864000)
+    if len(mlist) > 0:
+        redis1_.SetList(rkey, mlist, 864000)
+
+    try:
+        with open("./data/monitor_newdoc_explore.txt","w") as f:
+            for m in mlist:
+                f.write("%s\n"%m)
+    except:
+        pass
 
 
 def GetExposeDocList():
@@ -145,11 +194,20 @@ def GetNewDoc():
 
     dds = DocDictStruct()
 
+    offline_program = {}
+    try:
+        with open("./data/offline_program.txt","r") as f:
+            for line in f:
+                program_id = line.replace("\n","")
+                offline_program[program_id] = True
+    except:
+        pass
+
     try:
         with open("./data/newdoc_v2.txt", "rb") as f:
             for line in f:
                 arr = line.replace("\n","").split("@")
-                if len(arr) == 5:
+                if len(arr) == 5 and False == offline_program.has_key(arr[0]):
                     ds = DocStruct(arr[0], int(arr[1]), int(arr[2]), float(arr[3]), arr[4])
                     dds[arr[0]] = ds
     except:
@@ -161,14 +219,14 @@ if "__main__" == __name__:
 
     #Step0 从Redis中获取当前队列
     prepareDoc = DownLoadDoc()
-    print "========================= length of prepareDoc",len(prepareDoc)
+    print "Step0 Init From Redis ========================= length of prepareDoc",len(prepareDoc)
 
     #Step1 将满足条件的新节目加入字典中
     newDoc = GetNewDoc()
     for k,v in newDoc.items():
         prepareDoc.AddNewElem(v)
 
-    print "=========================length of newDoc",len(newDoc)
+    print "Step1 Merge New Doc =========================length of prepareDoc",len(prepareDoc)
 
     #Step2 消费队列，并将消费情况计入到字典中
     click_queue=GetExposeDocList()
@@ -176,14 +234,19 @@ if "__main__" == __name__:
 
     #Step3 将消费完的字典内容提出并加入到备选队列中，并通过ES统计反馈的点击计算点击率
     fullDoc = prepareDoc.ClearFullList()
-    print "=========================length of fullDoc",len(fullDoc)
-
+    print "length of fullDoc=====", len(fullDoc)
     moreActionDoc = CaculateFullDoc(fullDoc)
     for k,v in moreActionDoc.items():
         prepareDoc.AddNewElem(v)
+    print "Step3 Clear OffLine Doc=========================length of prepareDoc", len(prepareDoc)
 
+    #Step4 清除过期的节目
+    prepareDoc.ClearExpTimeList(3*24*60*60)
+    print "Step4 Clear ExpTime Doc=========================length of prepareDoc", len(prepareDoc)
 
-    #Step4 从字典中输出满足条件的节目List到前线
+    Stat(prepareDoc)
+
+    #Step5 从字典中输出满足条件的节目List到前线
     mlist = prepareDoc.GetIdList()
     SetmList(mlist)
 
